@@ -1,0 +1,10 @@
+# Reproducing FUZZING.md creates a virtualenv in this directory
+venv/
+.venv/
+
+# Schemathesis report output
+schemathesis-report/
+*.har
+
+__pycache__/
+*.py[cod]

@@ -1,0 +1,858 @@
+openapi: 3.1.0
+
+info:
+  title: Karriere München — SAP SuccessFactors RMK Job Search API
+  version: "1.0.0-reverse-engineered"
+  summary: Public job-search endpoint behind karriere-muenchen.jobs.hr.cloud.sap
+  description: |
+    Reverse-engineered specification of the job search API used by the
+    Landeshauptstadt München careers portal, which runs on **SAP SuccessFactors
+    Recruiting Marketing (RMK / "Career Site Builder")**.
+
+    The public site is a JavaScript single-page search UI; every result you see
+    in the browser comes from the single endpoint documented here. The rendered
+    HTML at `/search/` contains **no** job records.
+
+    ## Authentication — there is none
+
+    Verified live on 2026-08-09: the endpoint is fully anonymous.
+
+    | Sent | Result |
+    |---|---|
+    | No `Cookie`, no `X-CSRF-Token` | `200` + full results |
+    | Bogus `X-CSRF-Token` | `200` + full results |
+    | Stale `JSESSIONID` | `200` + full results |
+
+    The `X-CSRF-Token` header and `JSESSIONID` cookie that the browser sends are
+    **not validated**. Omit them. A `JSESSIONID` is set on every response but
+    carries no search state.
+
+    ## Error convention
+
+    Status codes are meaningful, but **`200` does not imply a match** and
+    `"totalJobs": 0` does not imply an error:
+
+    | Status | Body | Meaning |
+    |---|---|---|
+    | `200` | `jobSearchResult` + `totalJobs` | Matches found |
+    | `200` | `{"totalJobs": 0}`, no `error` | Valid query, **genuinely no matches** |
+    | `400` | `error` + `"totalJobs": 0` | `BadRequest` / `InvalidField` |
+    | `500` | `error` + `"totalJobs": 0` | Server-side crash (see `alertId`) |
+    | `302` | `text/html` error page | Payload could not be deserialized |
+    | `405` / `415` | — | Wrong method / wrong content type |
+
+    The critical asymmetry: an **empty result set is reported as `200` with no
+    `error` member**, and several distinct causes collapse onto it — a keyword
+    that matches nothing, an unpublished `locale`, an empty `categoryId`. Callers
+    must therefore branch on the presence of `error`, not on `totalJobs == 0`.
+
+    A `302` carries an HTML body rather than JSON, so JSON parsing will throw
+    rather than yield an error object. Handle it as a distinct transport-level
+    failure.
+
+    ## Coverage caveat
+
+    This spec is derived by black-box probing, not from vendor documentation.
+    See `README.md` for a field-by-field breakdown of what is
+    **confirmed-live** versus **inferred**. Optional response fields were
+    observed across a census of all 30 currently published postings, so rare
+    fields belonging to job types not presently advertised may be missing.
+
+  contact:
+    name: Careers portal (upstream, not an API owner)
+    url: https://karriere-muenchen.jobs.hr.cloud.sap/
+  license:
+    name: Specification text — public domain (CC0-1.0). The API itself is not ours.
+    identifier: CC0-1.0
+
+servers:
+  - url: https://karriere-muenchen.jobs.hr.cloud.sap
+    description: Landeshauptstadt München careers portal (production)
+
+tags:
+  - name: Jobs
+    description: Job search and facet aggregation.
+
+paths:
+  /services/recruiting/v1/jobs:
+    post:
+      tags: [Jobs]
+      operationId: searchJobs
+      # Verified anonymous: absent, bogus and stale credentials all return full
+      # results. An empty array declares "no authentication required".
+      security: []
+      summary: Search job postings, or aggregate facet counts
+      description: |
+        A single endpoint with **two mutually exclusive modes**, selected by the
+        `facetingOnly` flag:
+
+        1. **Search mode** (`facetingOnly` absent or `false`) — returns a page of
+           job records in `jobSearchResult` plus the grand total in `totalJobs`.
+        2. **Faceting mode** (`facetingOnly: true`) — returns *no* job records.
+           Returns `facetFields` with value/count aggregations plus `totalJobs`.
+           Requires a non-empty `facetFields` array; with an empty array the
+           response degenerates to `{"totalJobs": N}`.
+
+        Only `locale` is genuinely required. Omitting it yields
+        `BadRequest: locale cannot be null`.
+
+        ### Page size is fixed at 10
+
+        Verified: `pageSize`, `limit`, `size` and `itemsPerPage` are all silently
+        ignored. To enumerate every posting, iterate `pageNumber` from `0` until
+        `jobSearchResult` comes back empty.
+
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JobSearchRequest'
+            examples:
+              allJobs:
+                summary: All open jobs, first page (the correct "match everything" query)
+                description: >
+                  An **empty** `keywords` string is the match-all query. Do not
+                  use `"*"` — it is treated as a literal term and matches nothing.
+                value:
+                  locale: de_DE
+                  pageNumber: 0
+                  keywords: ""
+                  location: ""
+                  facetFilters: {}
+                  categoryId: 0
+              keywordSearch:
+                summary: Full-text keyword search
+                value:
+                  locale: de_DE
+                  pageNumber: 0
+                  sortBy: ""
+                  keywords: Erzieher
+                  location: ""
+                  facetFilters: {}
+                  brand: ""
+                  skills: []
+                  categoryId: 0
+                  alertId: ""
+                  rcmCandidateId: ""
+              facetFiltered:
+                summary: Filter by a facet value (occupational group)
+                value:
+                  locale: de_DE
+                  pageNumber: 0
+                  keywords: ""
+                  location: ""
+                  facetFilters:
+                    cust_BerufGr: [Lehrberufe]
+                  categoryId: 0
+              facetingOnly:
+                summary: Facet aggregation only, no job records
+                value:
+                  facetingOnly: true
+                  locale: de_DE
+                  keywords: ""
+                  location: ""
+                  categoryId: 0
+                  facetFields: [cust_BerufGr, cust_ReferatKarriereseite]
+                  facetFilters: {}
+
+      responses:
+        '200':
+          description: |
+            Query executed successfully. **This includes queries that matched
+            nothing** — an empty result set is a `200` with `"totalJobs": 0` and
+            no `error` member.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobSearchResponse'
+              examples:
+                searchHit:
+                  summary: Search mode — results found
+                  value:
+                    jobSearchResult:
+                      - response:
+                          id: "24289"
+                          unifiedStandardTitle: Fachlehrer*in für allgemeinbildende Schulen
+                          urlTitle: Fachlehrerin-f%C3%BCr-allgemeinbildende-Schulen
+                          unifiedUrlTitle: Fachlehrerin-f%C3%BCr-allgemeinbildende-Schulen
+                          unifiedStandardStart: 27.01.26
+                          unifiedStandardEnd: 15.01.27
+                          supportedLocales: [de_DE]
+                          currency: [EUR]
+                          cust_ReferatEigen: Referat für Bildung und Sport
+                          cust_BerufGr: [Lehrberufe, Lehrberufe]
+                          cust_BesoldGr_Karriereseite: [A11, A11]
+                    totalJobs: 30
+                noHits:
+                  summary: Search mode — zero matches (the common "empty result" case)
+                  description: >
+                    Note the absence of `jobSearchResult` entirely — not an empty
+                    array. Client code must treat the key as optional.
+                  value:
+                    totalJobs: 0
+                facets:
+                  summary: Faceting mode
+                  value:
+                    facetFields:
+                      - name: cust_BerufGr
+                        valueCount: 5
+                        values:
+                          - name: Erziehungsberufe
+                            count: 9
+                          - name: Lehrberufe
+                            count: 7
+                    totalJobs: 30
+        '400':
+          description: |
+            Rejected request. Observed causes:
+
+            - **`BadRequest: locale cannot be null`** — `locale` omitted.
+            - **`InvalidField: Field not configured in facets`** — a facet field
+              the portal has not configured, in *either* `facetFields` or as a
+              key of `facetFilters`.
+            - **`InternalError: Internal error`** — a C0 control character in
+              `keywords`. Despite the name and the generic code, this is a
+              `400`, not a `500`.
+            - An **empty request body** also yields `400`, with no content type
+              and no body.
+
+            Note that `locale: ""` is treated as absent and reports
+            `locale cannot be null`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                missingLocale:
+                  summary: Required field omitted
+                  value:
+                    error:
+                      code: BadRequest
+                      message: locale cannot be null
+                    totalJobs: 0
+                badFacetField:
+                  summary: Unconfigured facet field
+                  value:
+                    error:
+                      code: InvalidField
+                      message: Field not configured in facets
+                    totalJobs: 0
+        '500':
+          description: |
+            Server-side failure. **Reproducibly triggered by unvalidated input**
+            rather than by transient conditions — see the `alertId` field, where
+            any non-numeric non-empty value crashes the query instead of being
+            rejected with a `400`. Deterministic across repeated attempts.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: Error
+                  message: Error retrieving jobs
+                totalJobs: 0
+        '302':
+          description: |
+            **Deserialization failure** — the payload could not be bound to the
+            server's request object. Triggered by malformed JSON, and by a field
+            whose JSON type cannot be coerced to the expected one:
+
+            - a string where a number is expected (`pageNumber`, `categoryId`)
+            - a scalar where an array or object is expected (`skills`,
+              `facetFields`, a `facetFilters` value given as a bare string)
+            - a number exceeding 32 bits (`pageNumber` ≥ 2147483648)
+            - a member whose **name is the empty string**, at any position
+
+            Redirects to the portal's HTML error page, so the response is
+            `text/html` — **JSON parsing will throw rather than produce an error
+            object**. Semantically a client error despite the `3xx` code.
+          content:
+            text/html:
+              schema:
+                type: string
+                description: Portal error page markup; contains no machine-readable detail.
+        '405':
+          description: Method Not Allowed — the endpoint accepts `POST` only.
+        '415':
+          description: >
+            Unsupported Media Type — `Content-Type: application/json` is
+            mandatory. Form encoding is rejected.
+
+components:
+  schemas:
+
+    JobSearchRequest:
+      type: object
+      required: [locale]
+      # Faceting mode has two HTTP 500 triggers that search mode does not:
+      # any non-empty alertId, and a positive categoryId that does not exist.
+      # Both guards are generation-safety measures, not the real contract --
+      # a categoryId that genuinely exists is valid here but cannot be
+      # recognised by a generator. See the two field descriptions.
+      if:
+        required: [facetingOnly]
+        properties:
+          facetingOnly:
+            const: true
+      then:
+        properties:
+          alertId:
+            const: ""
+          categoryId:
+            maximum: 0
+      additionalProperties: true
+      # Explicit because the if/then above otherwise leaves the named
+      # properties "unevaluated" for strict JSON Schema 2020-12 validators.
+      unevaluatedProperties: true
+      propertyNames:
+        minLength: 1
+      description: >
+        Unknown members are accepted and ignored, which is why the browser can
+        send its full payload to both modes. Only the members below have any
+        observed effect. One exception: a member whose **name is the empty
+        string** breaks deserialization and yields a `302`, hence the
+        `propertyNames` guard.
+      properties:
+
+        locale:
+          type: string
+          minLength: 1
+          description: |
+            **The only required field.** Restricts results to postings published
+            in that locale. An empty string counts as absent and is rejected with
+            `400 BadRequest: locale cannot be null`.
+
+            This portal publishes **exclusively in `de_DE`**. Any other value —
+            including `en_US` and syntactically invalid values like `xx_YY` —
+            returns `{"totalJobs": 0}` with no error. A zero result is therefore
+            not proof of a bad locale.
+          examples: [de_DE]
+
+        pageNumber:
+          type: integer
+          format: int32
+          default: 0
+          minimum: 0
+          maximum: 2147483647
+          description: |
+            Zero-based page index. Page size is fixed at **10** and cannot be
+            changed. Reading past the end returns `totalJobs` unchanged with an
+            **absent** `jobSearchResult` — use that as the stop condition.
+
+            Negative values are clamped to the first page rather than rejected.
+
+            **32-bit signed.** `2147483647` is accepted; `2147483648` and beyond
+            fail deserialization with a `302`. Well before that limit the
+            offset arithmetic (`pageNumber × 10`) overflows and the endpoint
+            starts returning wrong pages rather than an error — `2147483647`
+            returns what looks like page 0. Keep `pageNumber` in the range the
+            result count actually implies.
+          examples: [0]
+
+        keywords:
+          type: string
+          default: ""
+          maxLength: 250
+          pattern: '^[^\u0000-\u0008\u000b-\u001f]*$'
+          description: |
+            **Hard limit of 250 characters**, shared with `location`. 251 or
+            more returns `400 BadRequest: Maximum criteria string length allowed
+            in queryList for each field is 250`.
+
+            **C0 control characters are rejected** with
+            `400 InternalError: Internal error` — the search backend refuses
+            them. `TAB`, `LF` and `DEL` pass through harmlessly; `NUL`, `ESC`
+            and friends do not. The `pattern` encodes the safe subset. Strip
+            control characters from user input before sending.
+
+            Full-text query across posting title, description and indexed custom
+            fields. Case-insensitive (`Arbeit`, `arbeit`, `ARBEIT` are
+            equivalent).
+
+            **Matching is token-prefix based, not substring.** `Arbeit` matches
+            16 postings, but the mid-word fragments `rbeit` and `beit` match
+            zero. Wildcards are not supported: a trailing `*` is stripped rather
+            than expanded (`Arbeit*` == `Arbeit`), and a bare `"*"` is treated as
+            a literal term matching **nothing**.
+
+            **Use `""` (empty string) to match all postings.** This is the single
+            most common source of unexpectedly empty results — see `README.md`.
+          examples: ["", Erzieher]
+
+        location:
+          type: string
+          default: ""
+          maxLength: 250
+          description: >
+            Free-text location filter matched against the posting's work
+            address. Confirmed to narrow results (`München` → 5 of 30;
+            `Berlin` → 0). Note that most postings carry no address data at all,
+            so any non-empty value filters out the majority — including jobs that
+            really are in Munich.
+          examples: [""]
+
+        categoryId:
+          type: integer
+          format: int32
+          default: 0
+          minimum: -2147483648
+          maximum: 2147483647
+          description: |
+            **32-bit signed**, like `pageNumber`: `2147483647` is accepted,
+            `2147483648` fails deserialization with a `302`.
+
+            Numeric category (Berufsfeld) filter used by the portal's `/go/...`
+            landing pages. **`0` means "no category filter"** — it is not a real
+            category id.
+
+            Category ids are minted per portal and are not enumerable through
+            this API; harvest them from `/go/` links on the site. A stale or
+            currently-unstaffed category silently yields zero results — e.g.
+            `8927001` ("IT & Telekommunikation") returns 0 because the portal
+            has no IT postings at present.
+
+            ⚠️ **Server-side defect in faceting mode.** In search mode an
+            unknown id harmlessly returns zero results. Under
+            `facetingOnly: true` a **positive id that does not exist crashes the
+            request** with `500 Error retrieving jobs`:
+
+            | `categoryId` under `facetingOnly: true` | Result |
+            |---|---|
+            | `0`, or any negative value | `200` |
+            | `8927001` (a real category) | `200` |
+            | `1`, `12345`, `2147483647` (unknown) | **`500`** |
+
+            Since valid ids cannot be discovered through the API, the only
+            reliably safe faceting request is `categoryId: 0`.
+          examples: [0]
+
+        facetFilters:
+          type: object
+          default: {}
+          description: |
+            Facet constraints, keyed by facet field name. **Values must be
+            arrays of strings**; passing a bare string triggers an HTTP `302` to
+            the error page.
+
+            Multiple keys combine with **AND**, so unrelated pairs legitimately
+            return zero (verified: `cust_BerufGr=Lehrberufe` AND
+            `cust_ReferatKarriereseite=Baureferat` → 0). Values must match the
+            facet `name` returned by faceting mode **exactly**, including German
+            umlauts and spacing.
+
+            **Keys are validated**: a key that is not a configured facet field
+            returns `400 InvalidField`, exactly as in `facetFields`.
+          propertyNames:
+            $ref: '#/components/schemas/FacetFieldName'
+          additionalProperties:
+            type: array
+            items:
+              type: string
+          examples:
+            - cust_BerufGr: [Lehrberufe]
+
+        facetingOnly:
+          type: boolean
+          default: false
+          description: >
+            Switches the endpoint into faceting mode. When `true`, no job records
+            are returned regardless of how many match; only `facetFields` and
+            `totalJobs`.
+
+        facetFields:
+          type: array
+          description: |
+            Facet fields to aggregate. Only meaningful when `facetingOnly` is
+            `true`; an empty array produces a bare `{"totalJobs": N}`.
+
+            Requesting a field the portal has not configured returns
+            `400 InvalidField: Field not configured in facets`.
+          items:
+            $ref: '#/components/schemas/FacetFieldName'
+          examples:
+            - [cust_BerufGr, cust_ReferatKarriereseite]
+
+        sortBy:
+          type: string
+          default: ""
+          description: >
+            Accepted but **no ordering effect could be demonstrated**. Every
+            probed value — `""`, `postingStartDate`, `unifiedStandardStart`,
+            `relevancy`, `title`, and a deliberately bogus string — returned an
+            identical result order, and invalid values are not rejected. Send
+            `""` and sort client-side.
+
+        brand:
+          type: string
+          default: ""
+          description: >
+            Multi-brand career-site selector. This portal is single-brand; no
+            effect observed. Send `""`.
+
+        skills:
+          type: array
+          items:
+            type: string
+          default: []
+          description: >
+            Skills-based matching (an RMK feature requiring candidate profile
+            data). Not enabled on this portal; no effect observed.
+
+        alertId:
+          type: string
+          default: ""
+          pattern: '^(|[+-]?[0-9]+)$'
+          description: |
+            Correlates a search with a saved job-alert subscription. Not needed
+            for anonymous querying — send `""`.
+
+            ⚠️ **Server-side defect — two distinct crash conditions**, both
+            returning a deterministic `500 Error retrieving jobs` where a `400`
+            would be correct.
+
+            **1. Search mode** (`facetingOnly` false/absent) — the value is
+            parsed as a number with the parse failure unhandled:
+
+            | Value | Result |
+            |---|---|
+            | `""`, `" "`, `"0"`, `"123"`, `"-1"`, `0` | `200` |
+            | `"abc"`, `"12x"`, `true`, `false`, U+0084 | **`500`** |
+            | `[]`, `{}` | `302` |
+
+            **2. Faceting mode** (`facetingOnly: true`) — **any non-empty value
+            crashes**, including well-formed numeric ones that are perfectly
+            safe in search mode:
+
+            | Value | Result |
+            |---|---|
+            | `""` or omitted | `200` |
+            | `"0"`, `"123"`, `0` | **`500`** |
+
+            The `if`/`then` at the schema root encodes the faceting-mode
+            restriction. **The safe rule for every caller is to omit `alertId`
+            or send `""`.**
+
+            The `pattern` above is a **client-side guard, not a constraint the
+            server advertises**, and is deliberately stricter than the server's
+            true tolerance: it admits only the empty string or digits, excluding
+            the whitespace the server happens to accept. Whitespace is excluded
+            on purpose — `\s` denotes a wider set in Python's regex engine than
+            in ECMA-262, and test-data generators built on the former will
+            otherwise emit exotic whitespace such as U+0085 and trip the crash.
+
+        rcmCandidateId:
+          type: string
+          default: ""
+          description: >
+            Logged-in candidate id, used for personalised ranking. Empty for
+            anonymous callers.
+
+    JobSearchResponse:
+      type: object
+      required: [totalJobs]
+      description: >
+        Successful (`200`) response. `totalJobs` is the only guaranteed member;
+        `jobSearchResult` and `facetFields` are each conditionally present. No
+        `error` member appears on a `200` — errors carry `400`/`500`.
+      properties:
+        totalJobs:
+          type: integer
+          description: >
+            Total postings matching the query across all pages — **not** the
+            number returned in this page. Present in every response, including
+            errors (where it is `0`).
+          examples: [30]
+        jobSearchResult:
+          type: array
+          description: >
+            Present in search mode **only when there is at least one match**.
+            The key is omitted entirely on zero results, so guard with a
+            null-coalescing read rather than assuming an empty array.
+          items:
+            $ref: '#/components/schemas/JobSearchResultEnvelope'
+        facetFields:
+          type: array
+          description: Present in faceting mode when `facetFields` was non-empty.
+          items:
+            $ref: '#/components/schemas/FacetField'
+
+    JobSearchResultEnvelope:
+      type: object
+      description: >
+        A single-member wrapper around each posting. The extra nesting carries no
+        information but cannot be avoided.
+      required: [response]
+      properties:
+        response:
+          $ref: '#/components/schemas/Job'
+
+    Job:
+      type: object
+      description: |
+        A job posting. Field availability was established by a census of all 30
+        postings published on 2026-08-09; the `required` set below is exactly the
+        set present on 100% of them.
+
+        Fields prefixed `cust_` are customer-defined extensions specific to the
+        Landeshauptstadt München configuration and will not exist on other RMK
+        portals. Fields prefixed `unified` are RMK's locale-resolved variants.
+      required:
+        - id
+        - unifiedStandardTitle
+        - urlTitle
+        - unifiedUrlTitle
+        - unifiedStandardStart
+        - supportedLocales
+        - currency
+        - cust_ReferatEigen
+        - cust_BerufGr
+      properties:
+
+        id:
+          type: string
+          description: |
+            Job **requisition** id, as a decimal string. Combine with `locale` to
+            build the canonical detail URL:
+
+                /job/{urlTitle}/{id}-{locale}/
+
+            Verified: `/job/x/24289-de_DE/` resolves — the slug segment is
+            cosmetic and any placeholder works.
+
+            Do **not** confuse this with the longer posting ids in
+            `/sitemap.xml` (e.g. `1287679301`), which live in a different id
+            space and are not returned by this API. A URL of the form
+            `/job/{slug}/{id}/` — without the `-{locale}` suffix — expects a
+            *posting* id and errors out for a requisition id.
+          examples: ["24289"]
+
+        unifiedStandardTitle:
+          type: string
+          description: >
+            Human-readable job title in the requested locale. This is the field
+            to display.
+          examples: [Erzieher*in / pädagogische Fachkraft (w/m/d)]
+
+        urlTitle:
+          type: string
+          description: >
+            Percent-encoded, URL-safe title slug. Already encoded — do not
+            re-encode when building a detail URL.
+          examples: [Erzieherin-p%C3%A4dagogische-Fachkraft-%28wmd%29]
+
+        unifiedUrlTitle:
+          type: string
+          description: >
+            Locale-resolved slug. Observed identical to `urlTitle` on all 30
+            postings; expected to diverge only on multi-locale portals.
+
+        unifiedStandardStart:
+          type: string
+          description: |
+            Posting publication date, formatted **`DD.MM.YY`** — a
+            locale-specific, non-ISO string with a two-digit year. Parse
+            explicitly; do not hand it to a generic date parser, which will read
+            `01.02.26` as a February date under US conventions.
+          examples: ["27.01.26"]
+
+        unifiedStandardEnd:
+          type: string
+          description: >
+            Posting expiry date, same `DD.MM.YY` format. Optional — present on
+            19 of 30 postings; absent means no scheduled unpublish date, not an
+            expired posting.
+          examples: ["15.01.27"]
+
+        supportedLocales:
+          type: array
+          items:
+            type: string
+          description: Locales this posting is published in. Always `["de_DE"]` here.
+
+        currency:
+          type: array
+          items:
+            type: string
+          description: >
+            Salary currency codes. Always `["EUR"]` here. An array despite
+            carrying a single value, and present even when no salary figure is
+            given.
+
+        cust_ReferatEigen:
+          type: string
+          description: >
+            Hiring municipal department (Referat) as free text. Related to the
+            `cust_ReferatKarriereseite` facet but **not guaranteed to use
+            identical wording** — do not join the two by string equality.
+          examples: [Referat für Bildung und Sport]
+
+        cust_BerufGr:
+          type: array
+          items:
+            type: string
+          description: >
+            Occupational group(s). **Values are frequently duplicated** in the
+            raw response (e.g. `["Lehrberufe", "Lehrberufe"]`); de-duplicate
+            before display. Matches the `cust_BerufGr` facet vocabulary.
+          examples:
+            - [Lehrberufe]
+
+        cust_BesoldGr_Karriereseite:
+          type: array
+          items:
+            type: string
+          description: >
+            Civil-servant pay grade (Besoldungsgruppe, A-scale) for *Beamte*
+            posts. Optional — 5 of 30. Also subject to duplicate values.
+            Mutually exclusive in practice with `cust_EntgeltGr_Karriereseite`.
+          examples:
+            - [A11]
+
+        cust_EntgeltGr_Karriereseite:
+          type: array
+          items:
+            type: string
+          description: >
+            Collective-agreement pay grade (Entgeltgruppe, TVöD) for public
+            employees. Optional — 19 of 30.
+          examples:
+            - [E3 TVöD]
+
+        cust_Bewerbungsfrist:
+          type: string
+          description: |
+            Application deadline. **Formatted `DD.MM.YYYY` — a four-digit year,
+            unlike the two-digit `unifiedStandard*` dates.** Two different date
+            formats coexist in the same object; parse them separately.
+
+            Optional — 12 of 30. Absent means applications are open-ended.
+          examples: ["31.10.2026"]
+
+        cust_Stellenmerkmal1:
+          type: array
+          items:
+            type: string
+          description: >
+            Free-text job attribute badge (experience requirements, working-time
+            models, etc.). Optional — 6 of 30. An open vocabulary, unsuitable
+            for filtering.
+          examples:
+            - [mind. 2 Jahre Berufserfahrung]
+
+        cust_Stellenmerkmal2:
+          type: array
+          items:
+            type: string
+          description: >
+            Second attribute badge. Optional and rare — 1 of 30.
+          examples:
+            - [Zulage]
+
+        jobLocationShort:
+          type: array
+          items:
+            type: string
+          description: >
+            Work address as display text. **Optional and rare — only 2 of 30
+            postings carry it**, which is why the `location` request filter
+            excludes most jobs. Contains runs of padding whitespace that should
+            be collapsed before display.
+          examples:
+            - ["Franz-Joseph-Straße    47    München "]
+
+        jobLocationShortWithCoordinates:
+          type: array
+          description: >
+            Geocoded form of `jobLocationShort`, co-occurring with it (2 of 30).
+          items:
+            type: object
+            properties:
+              value:
+                type: string
+                description: Address display text, matching `jobLocationShort`.
+              key:
+                type: string
+                description: >
+                  `"<latitude>,<longitude>"` in WGS84, as a single
+                  comma-separated **string** — split and parse to floats.
+                examples: ["48.1574831,11.5766293"]
+
+    FacetFieldName:
+      type: string
+      description: |
+        A facet field configured on this portal. The enum is **portal-specific
+        configuration, not part of the API contract** — other SuccessFactors RMK
+        sites expose a different set, and this one may gain fields over time.
+
+        Any other value is rejected with `400 InvalidField`, in both
+        `facetFields` and the keys of `facetFilters`.
+      enum:
+        - cust_BerufGr                 # occupational group
+        - cust_ReferatKarriereseite    # municipal department (Referat)
+
+    FacetField:
+      type: object
+      description: Aggregated counts for one facet field, honouring the current query.
+      properties:
+        name:
+          type: string
+          description: Facet field name, echoing the request.
+          examples: [cust_BerufGr]
+        valueCount:
+          type: integer
+          description: >
+            Number of entries in `values`. Note this counts *distinct facet
+            values*, not postings.
+          examples: [5]
+        values:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+                description: >
+                  Facet value — pass this verbatim into `facetFilters` to filter
+                  by it.
+                examples: [Erziehungsberufe]
+              count:
+                type: integer
+                description: Number of matching postings.
+                examples: [9]
+
+    ErrorResponse:
+      type: object
+      required: [totalJobs]
+      description: >
+        Error payload accompanying a `400` or `500`. Retains the `totalJobs`
+        member (always `0`) so the body shape stays uniform with success
+        responses.
+      properties:
+        totalJobs:
+          type: integer
+          description: Always `0` on an error.
+          examples: [0]
+        error:
+          $ref: '#/components/schemas/Error'
+
+    Error:
+      type: object
+      description: Machine-readable error detail.
+      properties:
+        code:
+          type: string
+          description: >
+            Error code. `BadRequest`, `InvalidField` and `InternalError`
+            accompany `400`; the generic `Error` accompanies `500`. Note that
+            `InternalError` denotes rejected input, **not** a server fault.
+          examples: [BadRequest, InvalidField, InternalError, Error]
+        message:
+          type: string
+          description: Human-readable English detail.
+          examples:
+            - locale cannot be null
+            - Field not configured in facets
+            - Internal error
+            - Error retrieving jobs
